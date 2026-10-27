@@ -1,5 +1,5 @@
 export type MailSniffErrorCode =
-  'CONFIG_ERROR' | 'VALIDATION_ERROR' | 'DATASET_ERROR' | 'CACHE_ERROR';
+  'CONFIG_ERROR' | 'VALIDATION_ERROR' | 'DATASET_ERROR' | 'CACHE_ERROR' | 'CLOSED_ERROR';
 
 /** Base class for every error thrown by MailSniff. Use `code` for programmatic handling. */
 export class MailSniffError extends Error {
@@ -12,7 +12,7 @@ export class MailSniffError extends Error {
   }
 }
 
-/** Invalid package options (for example a malformed refresh interval). */
+/** Invalid package options (for example a malformed refresh interval or Redis URL). */
 export class ConfigError extends MailSniffError {
   constructor(message: string, options?: ErrorOptions) {
     super(message, 'CONFIG_ERROR', options);
@@ -44,5 +44,13 @@ export class CacheError extends MailSniffError {
   constructor(message: string, options?: ErrorOptions) {
     super(message, 'CACHE_ERROR', options);
     this.name = 'CacheError';
+  }
+}
+
+/** The instance was used after `close()`. */
+export class ClosedError extends MailSniffError {
+  constructor(message = 'This MailSniff instance has been closed', options?: ErrorOptions) {
+    super(message, 'CLOSED_ERROR', options);
+    this.name = 'ClosedError';
   }
 }

@@ -15,7 +15,7 @@ export default defineConfig(
   eslint.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
   {
-    files: ['**/*.ts'],
+    files: ['**/*.{ts,mts,cts}'],
     languageOptions: {
       parserOptions: {
         projectService: true,
@@ -25,6 +25,20 @@ export default defineConfig(
     },
     rules: {
       '@typescript-eslint/consistent-type-imports': 'error',
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        {
+          argsIgnorePattern: '^_',
+        },
+      ],
+    },
+  },
+  {
+    // Test doubles return promises without awaiting, and mocks are asserted by reference.
+    files: ['test/**/*.ts'],
+    rules: {
+      '@typescript-eslint/require-await': 'off',
+      '@typescript-eslint/unbound-method': 'off',
     },
   },
   {
