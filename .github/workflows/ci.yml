@@ -66,6 +66,8 @@ jobs:
         run: pnpm run test:coverage
 
       - name: Integration tests
+        env:
+          MAILSNIFF_LIVE: 1
         run: pnpm run test:integration
 
       - name: Build
