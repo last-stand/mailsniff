@@ -8,8 +8,6 @@ import { buildBlocklist } from '../helpers/fixtures';
 
 const REDIS_URL = process.env['REDIS_URL'];
 
-console.log(REDIS_URL);
-
 // Runs against a real Redis (CI provides one). Skipped locally unless REDIS_URL is set.
 describe.skipIf(!REDIS_URL)('Redis backend (real Redis)', () => {
   const keyPrefix = `mailsniff-test:${randomUUID()}`;

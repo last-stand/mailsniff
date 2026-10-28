@@ -79,6 +79,7 @@ export interface ResolvedRedisOptions {
 export interface ResolvedOptions {
   readonly matchSubdomains: boolean;
   readonly failOnInitError: boolean;
+  readonly refreshIntervalMs: number | undefined;
   readonly onError: (error: Error) => void;
   readonly dataset: ResolvedDatasetOptions;
   readonly redis: ResolvedRedisOptions | undefined;
@@ -266,6 +267,8 @@ export function resolveOptions(options: MailSniffOptions = {}): ResolvedOptions 
   return {
     matchSubdomains: readBoolean(options.matchSubdomains, 'matchSubdomains', true),
     failOnInitError: readBoolean(options.failOnInitError, 'failOnInitError', false),
+    refreshIntervalMs:
+      options.refreshInterval === undefined ? undefined : parseInterval(options.refreshInterval),
     onError: options.onError ?? noop,
     dataset: resolveDataset(options.dataset),
     redis,

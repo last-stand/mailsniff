@@ -21,6 +21,7 @@ const EXPECTED_EXPORTS = [
   'isDisposableDomain',
   'isDisposableEmail',
   'listDisposableDomains',
+  'refresh',
   'removeDisposableDomains',
   'status',
 ];

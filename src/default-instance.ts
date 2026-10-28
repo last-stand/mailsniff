@@ -1,6 +1,6 @@
 import { ConfigError } from './errors';
 import { MailSniff } from './mailsniff';
-import type { ClearCacheOptions, MailSniffOptions, MailSniffStatus } from './types';
+import type { ClearCacheOptions, MailSniffOptions, MailSniffStatus, RefreshResult } from './types';
 
 /**
  * Lazily created singleton behind the top-level functions, for the quick-start use case.
@@ -49,6 +49,10 @@ export function addDisposableDomains(domains: string | readonly string[]): Promi
 
 export function removeDisposableDomains(domains: string | readonly string[]): Promise<void> {
   return getDefaultInstance().removeDisposableDomains(domains);
+}
+
+export function refresh(): Promise<RefreshResult> {
+  return getDefaultInstance().refresh();
 }
 
 export function clearCache(options?: ClearCacheOptions): Promise<void> {

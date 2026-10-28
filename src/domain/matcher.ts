@@ -74,6 +74,11 @@ export class DomainMatcher {
     return [...new Set([...this.community, ...this.custom])].sort();
   }
 
+  /** Community domains only (no custom ones), in unspecified order. */
+  listCommunity(): string[] {
+    return [...this.community];
+  }
+
   private has(domain: string): boolean {
     return this.community.has(domain) || this.custom.has(domain);
   }

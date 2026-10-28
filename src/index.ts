@@ -21,6 +21,7 @@ export {
   isDisposableDomain,
   isDisposableEmail,
   listDisposableDomains,
+  refresh,
   removeDisposableDomains,
   status,
 } from './default-instance';
@@ -36,6 +37,8 @@ export type {
   MailSniffState,
   MailSniffStatus,
   RedisConfig,
+  RefreshResult,
+  RefreshStatus,
 } from './types';
 
 /** Creates an independent instance with its own configuration and cache. */

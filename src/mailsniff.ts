@@ -1,14 +1,29 @@
-import type { CommunitySnapshot, DomainCache } from './cache/domain-cache';
+import type { DomainCache } from './cache/domain-cache';
 import { MemoryCache } from './cache/memory-cache';
 import { RedisCache } from './cache/redis-cache';
 import { resolveOptions } from './config/options';
 import type { ResolvedOptions } from './config/options';
-import { fetchDataset } from './dataset/fetcher';
-import { parseBlocklist } from './dataset/parser';
+import {
+  DEFAULT_REFRESH_LOCK_TTL_MS,
+  PEER_WAIT_MARGIN_MS,
+  REFRESH_FRESHNESS_RATIO,
+  REFRESH_INITIAL_BACKOFF_MS,
+  REFRESH_LOCK_TIMEOUT_MARGIN_MS,
+  VERSION_CHECK_INTERVAL_MS,
+} from './constants';
 import { DomainMatcher } from './domain/matcher';
 import { extractEmailDomain, normalizeDomain, normalizeDomains } from './domain/normalize';
-import { ClosedError, ConfigError, DatasetError } from './errors';
-import type { ClearCacheOptions, MailSniffOptions, MailSniffState, MailSniffStatus } from './types';
+import { ClosedError, ConfigError } from './errors';
+import { CommunityRefresher } from './refresh/refresher';
+import { RefreshScheduler } from './refresh/scheduler';
+import { DomainStore } from './store/domain-store';
+import type {
+  ClearCacheOptions,
+  MailSniffOptions,
+  MailSniffState,
+  MailSniffStatus,
+  RefreshResult,
+} from './types';
 import { toError } from './utils/error';
 
 function assertString(value: unknown, name: string): asserts value is string {
@@ -31,21 +46,26 @@ function toDomainList(input: unknown): readonly unknown[] {
  * Detects disposable email addresses and domains.
  *
  * Lookups run against an in-process snapshot, so after initialization they perform no I/O
- * regardless of the cache backend. The backend is only used to share and persist data.
+ * regardless of the cache backend. The backend is only used to share and persist data;
+ * changes made by other instances are picked up by a throttled background check.
  */
 export class MailSniff {
   private readonly options: ResolvedOptions;
   private readonly cache: DomainCache;
   private readonly matcher: DomainMatcher;
+  private readonly store: DomainStore;
+  private readonly refresher: CommunityRefresher;
+  private readonly scheduler: RefreshScheduler | undefined;
 
   private initPromise: Promise<void> | undefined;
-  private inflightLoad: Promise<void> | undefined;
+  private syncPromise: Promise<void> | undefined;
   private closePromise: Promise<void> | undefined;
   private initialized = false;
   private initializing = false;
   private closed = false;
-  private communityFetchedAt: number | null = null;
+  private lastVersionCheck = 0;
   private lastError: Error | null = null;
+  private initialDownload: RefreshResult | undefined;
 
   /** @throws {ConfigError} when `options` are invalid. Nothing is fetched or connected yet. */
   constructor(options: MailSniffOptions = {}) {
@@ -56,12 +76,39 @@ export class MailSniff {
       (this.options.redis
         ? new RedisCache({ ...this.options.redis, onError: this.reportError })
         : new MemoryCache());
+    this.store = new DomainStore(this.cache, this.matcher);
+
+    const { dataset, refreshIntervalMs } = this.options;
+    this.refresher = new CommunityRefresher({
+      cache: this.cache,
+      store: this.store,
+      matcher: this.matcher,
+      dataset,
+      lockTtlMs: Math.max(
+        DEFAULT_REFRESH_LOCK_TTL_MS,
+        dataset.timeoutMs + REFRESH_LOCK_TIMEOUT_MARGIN_MS,
+      ),
+      peerWaitMs: dataset.timeoutMs + PEER_WAIT_MARGIN_MS,
+      freshnessMs:
+        refreshIntervalMs === undefined ? undefined : refreshIntervalMs * REFRESH_FRESHNESS_RATIO,
+      onError: this.reportError,
+    });
+
+    this.scheduler =
+      refreshIntervalMs === undefined
+        ? undefined
+        : new RefreshScheduler({
+            intervalMs: refreshIntervalMs,
+            initialBackoffMs: REFRESH_INITIAL_BACKOFF_MS,
+            task: async () => (await this.refresher.refresh({ force: false })).status !== 'failed',
+          });
   }
 
   /**
    * Connects the cache and loads the dataset. Called automatically by the first lookup,
    * so calling it is optional (for example to warm up at application start).
    * Resolves even when the network or Redis is down, unless `failOnInitError` is set.
+   * Starts the refresh schedule when `refreshInterval` is configured.
    * @throws {ConfigError} always, for configuration problems such as a missing `ioredis`.
    */
   init(): Promise<void> {
@@ -115,19 +162,16 @@ export class MailSniff {
   /**
    * Adds custom disposable domains. With Redis they are persisted and shared; with the
    * in-memory backend they last for the lifetime of the process. All-or-nothing.
+   * Community refreshes never touch them.
    * @throws {ValidationError} when any entry is invalid.
    * @throws {CacheError} when the backend rejects the write; nothing is changed locally.
    */
   async addDisposableDomains(domains: string | readonly string[]): Promise<void> {
     const normalized = normalizeDomains(toDomainList(domains));
     await this.ensureReady();
-    if (normalized.length === 0) {
-      return;
+    if (normalized.length > 0) {
+      await this.store.addCustom(normalized);
     }
-
-    // Write to the backend first so a failure cannot leave local state ahead of storage.
-    await this.cache.addCustomDomains(normalized);
-    this.matcher.addCustom(normalized);
   }
 
   /**
@@ -138,12 +182,41 @@ export class MailSniff {
   async removeDisposableDomains(domains: string | readonly string[]): Promise<void> {
     const normalized = normalizeDomains(toDomainList(domains));
     await this.ensureReady();
-    if (normalized.length === 0) {
-      return;
+    if (normalized.length > 0) {
+      await this.store.removeCustom(normalized);
     }
+  }
 
-    await this.cache.removeCustomDomains(normalized);
-    this.matcher.removeCustom(normalized);
+  /**
+   * Downloads the community list now, regardless of the refresh schedule.
+   *
+   * How it works:
+   * 1. Initializes the instance first if needed (connects the cache, loads or downloads data).
+   * 2. If this call triggered initialization and that already downloaded the list, returns
+   *    that result instead of downloading a second time.
+   * 3. Otherwise runs a forced refresh. Concurrent calls share one download, and instances
+   *    sharing Redis coordinate through a lock. A call that loses the lock waits for the
+   *    peer's result and resolves with status `synced`.
+   * 4. Downloads are validated (format, minimum size, shrink guard) before being served.
+   *    Custom domains are never touched.
+   *
+   * Operational failures (network, invalid dataset, cache outage) are returned as
+   * `status: 'failed'` and reported through `onError`, never thrown. The previous data
+   * keeps being served.
+   *
+   * @throws {ClosedError} after `close()`.
+   * @throws {ConfigError} for configuration problems found during initialization, such as a missing `ioredis`.
+   */
+  async refresh(): Promise<RefreshResult> {
+    const wasInitialized = this.initialized;
+    await this.ensureReady();
+
+    // This call triggered (or joined) initialization, which just downloaded the list.
+    // Downloading again would be wasted work.
+    if (!wasInitialized && this.initialDownload) {
+      return this.initialDownload;
+    }
+    return this.refresher.refresh({ force: true });
   }
 
   /**
@@ -153,20 +226,9 @@ export class MailSniff {
    */
   async clearCache(options: ClearCacheOptions = {}): Promise<void> {
     await this.ensureReady();
-    const includeCustom = options.includeCustom ?? false;
-
-    await this.cache.clear({ includeCustom });
-    this.matcher.replaceCommunity([]);
-    if (includeCustom) {
-      this.matcher.replaceCustom([]);
-    }
-    this.communityFetchedAt = null;
-
-    try {
-      await this.loadCommunity();
-    } catch (error) {
-      this.reportError(toError(error));
-    }
+    await this.refresher.idle();
+    await this.store.clear(options.includeCustom ?? false);
+    await this.refresher.refresh({ force: true });
   }
 
   /** Synchronous snapshot of the instance's health. Never throws. */
@@ -177,14 +239,17 @@ export class MailSniff {
       cacheHealthy: this.cache.isHealthy(),
       communityCount: this.matcher.communityCount,
       customCount: this.matcher.customCount,
-      communityFetchedAt: this.communityFetchedAt,
+      communityFetchedAt: this.store.fetchedAt,
+      autoRefresh: this.scheduler !== undefined,
+      nextRefreshAt: this.scheduler?.nextRunAt ?? null,
       lastError: this.lastError,
     };
   }
 
   /**
-   * Waits for in-flight work and releases resources. Redis clients created by MailSniff are
-   * closed; clients you passed in are left open. Idempotent. Any later call rejects with `ClosedError`.
+   * Stops the refresh schedule, waits for in-flight work and releases resources. Redis
+   * clients created by MailSniff are closed; clients you passed in are left open.
+   * Idempotent. Any later call rejects with `ClosedError`.
    */
   close(): Promise<void> {
     this.closePromise ??= this.shutdown();
@@ -193,7 +258,12 @@ export class MailSniff {
 
   private async shutdown(): Promise<void> {
     this.closed = true;
-    await Promise.allSettled([this.initPromise, this.inflightLoad]);
+
+    // Order matters: let init finish (it must not start the scheduler once closed),
+    // then stop the scheduler, then wait for whatever it left running.
+    await Promise.allSettled([this.initPromise]);
+    await this.scheduler?.stop();
+    await Promise.allSettled([this.refresher.idle(), this.syncPromise]);
 
     try {
       await this.cache.close();
@@ -206,7 +276,11 @@ export class MailSniff {
     if (this.closed) {
       return Promise.reject(new ClosedError());
     }
-    return this.initialized ? Promise.resolve() : this.init();
+    if (this.initialized) {
+      this.maybeSync();
+      return Promise.resolve();
+    }
+    return this.init();
   }
 
   private async runInit(): Promise<void> {
@@ -219,13 +293,27 @@ export class MailSniff {
       });
 
       if (connected) {
-        await this.tolerate(() => this.loadFromCache());
+        await this.tolerate(() => this.store.load());
       }
       if (!this.matcher.hasCommunity) {
-        await this.tolerate(() => this.loadCommunity());
+        await this.downloadInitialCommunity();
       }
+
+      this.lastVersionCheck = Date.now();
+      this.startScheduler();
     } finally {
       this.initializing = false;
+    }
+  }
+
+  /** The refresher already reported a failure through `onError`. */
+  private async downloadInitialCommunity(): Promise<void> {
+    const result = await this.refresher.refresh({ force: true });
+    if (result.status === 'updated') {
+      this.initialDownload = result;
+    }
+    if (result.error && this.options.failOnInitError) {
+      throw result.error;
     }
   }
 
@@ -246,53 +334,48 @@ export class MailSniff {
     }
   }
 
-  private async loadFromCache(): Promise<void> {
-    const [snapshot, custom] = await Promise.all([
-      this.cache.getCommunity(),
-      this.cache.getCustomDomains(),
-    ]);
-
-    if (snapshot) {
-      this.matcher.replaceCommunity(snapshot.domains);
-      this.communityFetchedAt = snapshot.fetchedAt;
+  private startScheduler(): void {
+    if (this.scheduler && !this.closed) {
+      this.scheduler.start(this.initialRefreshDelay());
     }
-    this.matcher.replaceCustom(custom);
   }
 
-  /** Single-flight: concurrent callers share one download. */
-  private loadCommunity(): Promise<void> {
-    this.inflightLoad ??= this.downloadCommunity().finally(() => {
-      this.inflightLoad = undefined;
-    });
-    return this.inflightLoad;
+  /**
+   * Waits until the loaded list is due for a refresh (immediately when it is already stale).
+   * Without a list, retries after the base backoff delay.
+   */
+  private initialRefreshDelay(): number {
+    const fetchedAt = this.store.fetchedAt;
+    const intervalMs = this.options.refreshIntervalMs ?? 0;
+    if (!this.matcher.hasCommunity || fetchedAt === null) {
+      return REFRESH_INITIAL_BACKOFF_MS;
+    }
+    return Math.max(0, fetchedAt + intervalMs - Date.now());
   }
 
-  private async downloadCommunity(): Promise<void> {
-    const { dataset } = this.options;
-    const result = await fetchDataset({
-      url: dataset.sourceUrl,
-      timeoutMs: dataset.timeoutMs,
-      maxBytes: dataset.maxBytes,
-      fetch: dataset.fetch,
-    });
-
-    if (result.status !== 'modified') {
-      throw new DatasetError('The dataset source returned an unexpected "not modified" response');
+  /**
+   * Stale-while-revalidate: at most every 30 s a lookup starts a background check for
+   * changes made by other instances. The lookup itself never waits for it. It also
+   * recovers from a backend outage, because the check reloads once the backend is back.
+   */
+  private maybeSync(): void {
+    const now = Date.now();
+    if (this.syncPromise || now - this.lastVersionCheck < VERSION_CHECK_INTERVAL_MS) {
+      return;
     }
 
-    // Only validated data reaches this point (parseBlocklist throws otherwise).
-    const domains = parseBlocklist(result.body, { minDomains: dataset.minDomains });
-    const snapshot: CommunitySnapshot = { domains, etag: result.etag, fetchedAt: Date.now() };
-
-    // Serve the new data immediately, even if the backend is down, then try to persist it.
-    this.matcher.replaceCommunity(domains);
-    this.communityFetchedAt = snapshot.fetchedAt;
-
-    try {
-      await this.cache.setCommunity(snapshot);
-    } catch (error) {
-      this.reportError(toError(error));
-    }
+    this.lastVersionCheck = now;
+    this.syncPromise = this.store
+      .syncIfChanged()
+      .then(
+        () => undefined,
+        (error: unknown) => {
+          this.reportError(toError(error));
+        },
+      )
+      .finally(() => {
+        this.syncPromise = undefined;
+      });
   }
 
   private currentState(): MailSniffState {
