@@ -10,7 +10,7 @@
     "blocklist",
     "redis"
   ],
-  "license": "MIT",
+  "license": "CC0-1.0",
   "author": "MailSniff contributors",
   "repository": {
     "type": "git",
