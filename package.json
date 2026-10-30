@@ -60,7 +60,8 @@
     "test:coverage": "vitest run test/unit --coverage",
     "test:integration": "vitest run test/integration --passWithNoTests",
     "check:package": "publint && attw --pack . --profile node16",
-    "prepublishOnly": "npm run format:check && npm run lint && npm run typecheck && npm run test && npm run build && npm run check:package"
+    "smoke": "node scripts/smoke-test.mjs",
+    "prepublishOnly": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run build && pnpm run check:package && pnpm run smoke"
   },
   "peerDependencies": {
     "ioredis": ">=5"
