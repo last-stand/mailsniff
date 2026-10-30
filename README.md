@@ -5,7 +5,7 @@
 [![npm version](https://img.shields.io/npm/v/mailsniff)](https://www.npmjs.com/package/mailsniff)
 [![npm downloads](https://img.shields.io/npm/dm/mailsniff)](https://www.npmjs.com/package/mailsniff)
 [![Node.js version](https://img.shields.io/node/v/mailsniff)](https://nodejs.org)
-[![License: CC0-1.0](https://img.shields.io/npm/l/mailsniff)](./LICENSE)
+[![License: Apache-2.0](https://img.shields.io/npm/l/mailsniff)](./LICENSE)
 [![CI](https://github.com/last-stand/mailsniff/actions/workflows/ci.yml/badge.svg)](https://github.com/last-stand/mailsniff/actions/workflows/ci.yml)
 
 MailSniff detects disposable and temporary email addresses (Mailinator-style throwaway inboxes) so you can block them during signup and email validation. It uses the community-maintained [disposable-email-domains](https://github.com/disposable-email-domains/disposable-email-domains) blocklist, keeps it fresh, and lets you add your own domains. It ships with TypeScript types, works with ESM and CommonJS, and needs no infrastructure (Redis is optional).
@@ -404,7 +404,7 @@ configure(options: MailSniffOptions): void
 ```
 
 - **Synchronous.** Call it once at startup, **before any other top-level function**, or again after `close()`.
-- Throws `ConfigError` for invalid options, and also when the default instance is already in use. Note that even `status()` creates the default instance, so call `configure()` first.
+- Throws `ConfigError` for invalid options, and also when the default instance is already in use, meaning a lookup, `init()` or another top-level function other than `status()` has run since the last `close()`. Calling `status()` first is safe: it reports an unused instance as `uninitialized` without creating one.
 - Nothing is downloaded or connected until the first lookup or `init()`.
 
 ```js
@@ -742,7 +742,7 @@ All errors extend `MailSniffError` and carry a `code` property: `CONFIG_ERROR`, 
 - **Everything returns `false` and `status().state` is `'degraded'`.** The community list is empty because the first download failed, for example in a network-restricted environment. Check `status().lastError`, set `onError`, and allow outbound HTTPS to `raw.githubusercontent.com` (or set `dataset.fetch` / `dataset.sourceUrl`). Custom domains still work. MailSniff does **not** block signups in this state, so alert on it if that matters to you.
 - **`ConfigError` mentioning `ioredis`.** Run `npm install ioredis`.
 - **`ConfigError` mentioning `REDIS_URL`.** `redis.url` was `undefined`: the environment variable is not set.
-- **`configure() must be called before the default instance is used`.** Another top-level function (even `status()`) ran first. Call `configure()` at the very start, or use `createMailSniff()`.
+- **`configure() must be called before the default instance is used`.** Another top-level function (a lookup, `init()`, ...) ran first. Call `configure()` at the very start, or use `createMailSniff()`.
 - **`refreshInterval` rejected.** Use a value between `'1m'` and `'24d'`, as whole numbers.
 - **"The dataset was rejected" in `onError`.** The download failed validation (too few domains, too many invalid lines, or a suspicious shrink). The previous list stays active.
 - **Process does not exit.** Call `close()`. MailSniff's own timers are unref'd, but an open Redis connection keeps Node alive.
@@ -782,7 +782,7 @@ if (state !== 'ready') {
 - Domains are matched, not whole addresses. Plus-addressing and aliases on legitimate providers (for example Gmail) are out of scope.
 - Wildcard patterns are not supported for custom domains. Subdomain matching covers the common case.
 - The in-memory backend does not persist or share anything. Use Redis if you need that.
-- If Redis is down while a download completes, the list is served locally but is not written to Redis until the next successful refresh.
+- If Redis is down while a download completes, the list is served locally and written to Redis by the first background check after Redis is back (unless another instance has stored a newer list in the meantime).
 - Timers are not restartable: after `close()`, create a new instance.
 - Requires Node.js 18 or newer (uses the global `fetch`).
 
@@ -791,7 +791,7 @@ if (state !== 'ready') {
 Contributions are welcome.
 
 - **Bugs and feature requests:** open an issue at [github.com/last-stand/mailsniff/issues](https://github.com/last-stand/mailsniff/issues) with steps to reproduce, expected and actual behavior, and your Node.js version.
-- **Pull requests:** fork the repository, create a branch, and run the checks before opening the PR (the project uses [pnpm](https://pnpm.io)):
+- **Pull requests:** fork the repository, create a branch, and run the checks before opening the PR (the project uses [pnpm](https://pnpm.io)). By submitting a pull request you agree to release your contribution under the same [Apache-2.0](./LICENSE) dedication as the project:
 
   ```bash
   pnpm install
@@ -799,6 +799,7 @@ Contributions are welcome.
   pnpm run typecheck
   pnpm run test
   pnpm run build
+  pnpm run smoke   # installs the packed package into a clean project
   ```
 
   Redis integration tests run with `REDIS_URL=redis://localhost:6379 pnpm run test:integration`.
@@ -807,6 +808,8 @@ Contributions are welcome.
 
 ## License and attribution
 
-MailSniff is released under the [Creative Commons Zero v1.0 Universal](./LICENSE) public domain dedication (`CC0-1.0`). You can copy, modify and use it for any purpose without asking permission or giving credit.
+MailSniff is released under the [Apache-2.0](./LICENSE). You are free to use, modify, and distribute this software, including for commercial purposes, subject to the terms and conditions of the license.
 
-The disposable domain list is **not** part of this repository or package. It is downloaded at runtime from the [disposable-email-domains](https://github.com/disposable-email-domains/disposable-email-domains) project, which also describes itself as licensed under CC0. See that repository for the current license and for the list of contributors. Thank you to its maintainers and contributors.
+The disposable email domain list is **not bundled with this repository or npm package**. It is downloaded at runtime from the [disposable-email-domains](https://github.com/disposable-email-domains/disposable-email-domains) project, which is licensed under CC0 1.0 Universal.
+
+The dataset remains subject to its original license. We are grateful to the maintainers and contributors of the disposable-email-domains project for making this resource available.
