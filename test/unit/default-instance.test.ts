@@ -66,6 +66,11 @@ describe('default instance', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('status() does not create the default instance, so configure() still works afterwards', () => {
+    expect(status().state).toBe('uninitialized');
+    expect(() => configure({ matchSubdomains: false })).not.toThrow();
+  });
+
   it('rejects configure() once the default instance is in use', async () => {
     stubGlobalFetch();
     await init();

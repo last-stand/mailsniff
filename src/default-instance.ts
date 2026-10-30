@@ -59,8 +59,12 @@ export function clearCache(options?: ClearCacheOptions): Promise<void> {
   return getDefaultInstance().clearCache(options);
 }
 
+/**
+ * Does not create the default instance: before first use it reports a pristine,
+ * unconfigured one, so `configure()` can still be called afterwards.
+ */
 export function status(): MailSniffStatus {
-  return getDefaultInstance().status();
+  return (defaultInstance ?? new MailSniff()).status();
 }
 
 /** Closes the default instance. A later call creates a fresh one (or call `configure()` first). */
