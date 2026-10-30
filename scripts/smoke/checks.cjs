@@ -101,10 +101,7 @@ async function checkCustomDomains(mailsniff, assert) {
 }
 
 async function checkRefresh(mailsniff, assert) {
-  assert.throws(
-    () => mailsniff.createMailSniff({ refreshInterval: '1s' }),
-    mailsniff.ConfigError,
-  );
+  assert.throws(() => mailsniff.createMailSniff({ refreshInterval: '1s' }), mailsniff.ConfigError);
 
   const sniff = mailsniff.createMailSniff(options({ refreshInterval: '1d' }));
   try {

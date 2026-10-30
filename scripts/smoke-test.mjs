@@ -66,7 +66,10 @@ function runNpm(args, cwd) {
 
 function packPackage(destination) {
   mkdirSync(destination); // `npm pack --pack-destination` requires an existing directory
-  const output = runNpm(['pack', '--json', '--ignore-scripts', '--pack-destination', destination], root);
+  const output = runNpm(
+    ['pack', '--json', '--ignore-scripts', '--pack-destination', destination],
+    root,
+  );
   const [result] = JSON.parse(output);
   assert.ok(result?.filename, 'npm pack did not report a tarball');
   return result;
