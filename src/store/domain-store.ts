@@ -12,6 +12,8 @@ export class DomainStore {
   private knownVersion: string | null = null;
   private currentEtag: string | undefined;
   private currentFetchedAt: number | null = null;
+  /** Last served list that could not be written to the cache yet. */
+  private pending: CommunitySnapshot | null = null;
 
   constructor(
     private readonly cache: DomainCache,
@@ -35,9 +37,13 @@ export class DomainStore {
     });
   }
 
-  /** Reloads only when the backend's version token differs. @returns whether it reloaded. */
+  /**
+   * Reloads only when the backend's version token differs. @returns whether it reloaded.
+   * A list that could not be persisted earlier is written first.
+   */
   syncIfChanged(): Promise<boolean> {
     return this.mutex.runExclusive(async () => {
+      await this.writePending();
       const version = await this.cache.getVersion();
       if (version === this.knownVersion) {
         return false;
@@ -49,14 +55,17 @@ export class DomainStore {
 
   /**
    * Serves a validated community list, then persists it. The list is served even when
-   * persisting fails (the error is then rethrown), because the data is already validated.
+   * persisting fails (the error is then rethrown and the list is retried by `syncIfChanged`),
+   * because the data is already validated.
    */
   applyCommunity(snapshot: CommunitySnapshot): Promise<void> {
     return this.mutex.runExclusive(async () => {
       this.matcher.replaceCommunity(snapshot.domains);
       this.currentEtag = snapshot.etag;
       this.currentFetchedAt = snapshot.fetchedAt;
+      this.pending = snapshot;
       await this.cache.setCommunity(snapshot);
+      this.pending = null;
     });
   }
 
@@ -78,6 +87,7 @@ export class DomainStore {
   clear(includeCustom: boolean): Promise<void> {
     return this.mutex.runExclusive(async () => {
       await this.cache.clear({ includeCustom });
+      this.pending = null; // a cleared cache must not be restored by a later write-back
       this.matcher.replaceCommunity([]);
       if (includeCustom) {
         this.matcher.replaceCustom([]);
@@ -104,5 +114,18 @@ export class DomainStore {
     }
     this.matcher.replaceCustom(custom);
     this.knownVersion = version;
+  }
+
+  /** Writes the unpersisted list, unless another instance already stored an equal or newer one. */
+  private async writePending(): Promise<void> {
+    const snapshot = this.pending;
+    if (!snapshot) {
+      return;
+    }
+    const stored = await this.cache.getCommunity();
+    if (!stored || stored.fetchedAt < snapshot.fetchedAt) {
+      await this.cache.setCommunity(snapshot);
+    }
+    this.pending = null;
   }
 }

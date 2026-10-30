@@ -160,6 +160,69 @@ describe('DomainStore', () => {
     });
   });
 
+  describe('write-back after a failed persist', () => {
+    const snapshot = { domains: ['a.test'], etag: '"x"', fetchedAt: 9 };
+
+    it('writes the served list to the backend on the next sync', async () => {
+      const { cache, store } = setup();
+      const setCommunity = vi
+        .spyOn(cache, 'setCommunity')
+        .mockRejectedValueOnce(new CacheError('down'));
+      await expect(store.applyCommunity(snapshot)).rejects.toBeInstanceOf(CacheError);
+      expect(await cache.getCommunity()).toBeNull();
+
+      await store.syncIfChanged();
+
+      expect(await cache.getCommunity()).toEqual(snapshot);
+      expect(setCommunity).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps retrying while the backend is still failing', async () => {
+      const { cache, store } = setup();
+      const failing = vi.spyOn(cache, 'setCommunity').mockRejectedValue(new CacheError('down'));
+      await store.applyCommunity(snapshot).catch(() => undefined);
+
+      await expect(store.syncIfChanged()).rejects.toBeInstanceOf(CacheError);
+
+      failing.mockRestore();
+      await store.syncIfChanged();
+      expect(await cache.getCommunity()).toEqual(snapshot);
+    });
+
+    it('does not overwrite a newer list stored by another instance, and adopts it', async () => {
+      const { cache, matcher, store } = setup();
+      vi.spyOn(cache, 'setCommunity').mockRejectedValueOnce(new CacheError('down'));
+      await store.applyCommunity(snapshot).catch(() => undefined);
+      await cache.setCommunity({ domains: ['peer.test'], fetchedAt: 20 });
+
+      await store.syncIfChanged();
+
+      expect(await cache.getCommunity()).toEqual({ domains: ['peer.test'], fetchedAt: 20 });
+      expect(matcher.matches('peer.test')).toBe(true);
+    });
+
+    it('is dropped by clear()', async () => {
+      const { cache, store } = setup();
+      vi.spyOn(cache, 'setCommunity').mockRejectedValueOnce(new CacheError('down'));
+      await store.applyCommunity(snapshot).catch(() => undefined);
+      await store.clear(false);
+
+      await store.syncIfChanged();
+
+      expect(await cache.getCommunity()).toBeNull();
+    });
+
+    it('does nothing when every write succeeded', async () => {
+      const { cache, store } = setup();
+      await store.applyCommunity(snapshot);
+      const setCommunity = vi.spyOn(cache, 'setCommunity');
+
+      await store.syncIfChanged();
+
+      expect(setCommunity).not.toHaveBeenCalled();
+    });
+  });
+
   describe('clear', () => {
     it('keeps custom domains by default and resets the list metadata', async () => {
       const { matcher, store } = setup();
